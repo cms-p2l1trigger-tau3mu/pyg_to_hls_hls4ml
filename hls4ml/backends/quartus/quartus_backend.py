@@ -2,7 +2,7 @@ import numpy as np
 import os
 from contextlib import contextmanager
 from hls4ml.model.types import NamedType, IntegerPrecisionType, FixedPrecisionType
-from hls4ml.model.layers import Layer, Dense, Activation, Softmax, Embedding
+from hls4ml.model.layers import Layer, Dense, Activation, Softmax, Conv1D, Conv2D, Embedding
 from hls4ml.model.optimizer import get_backend_passes, layer_optimizer
 from hls4ml.model.flow import register_flow
 from hls4ml.backends import FPGABackend
@@ -33,6 +33,8 @@ class QuartusBackend(FPGABackend):
 
         quartus_types = [
             'quartus:transform_types',
+            'quartus:generate_conv_instructions',
+            'quartus:apply_resource_strategy',
         ]
         quartus_types_flow = register_flow('specific_types', quartus_types, requires=[init_flow], backend=self.name)
 
@@ -86,31 +88,6 @@ class QuartusBackend(FPGABackend):
 
         return config
 
-    def gen_quartus_weight_array(self, layer):
-        rf = layer.get_attr('reuse_factor')
-        block_factor = int((layer.attributes['n_in']*layer.attributes['n_out'])/rf)
-        bf_rounded = int(pow(2, np.ceil(np.log2(block_factor))))
-        rf_rounded = int(pow(2, np.ceil(np.log2(rf))))
-
-        layer.weights['weight'].data = np.transpose(layer.weights['weight'].data).flatten()
-
-        if(layer.attributes['n_in']*layer.attributes['n_out'] > 2048 and rf_rounded != rf):
-            layer.set_attr('rfpad', rf_rounded-rf)
-            layer.set_attr('bfpad', bf_rounded-block_factor)
-
-            temp = np.empty([bf_rounded, rf_rounded])
-            for i in range(rf_rounded):
-                for j in range (bf_rounded):
-                    if (i < rf and j < block_factor):
-                        w_index = i + rf * j
-                        temp[j][i] = layer.weights['weight'].data[w_index]
-                    else:
-                        temp[j][i] = 0
-            layer.weights['weight'].data = temp.flatten()
-
-        layer.weights['weight'].data_length = layer.weights['weight'].data.size
-        return
-
     def build(self, model, synth=True, fpgasynth=False):
         """
         Builds the project using Intel HLS compiler.
@@ -163,7 +140,6 @@ class QuartusBackend(FPGABackend):
         else:
             n_in, n_out = self.get_layer_mult_size(layer)
             self.set_closest_reuse_factor(layer, n_in, n_out)
-            self.gen_quartus_weight_array(layer)
             layer.set_attr('strategy', 'resource')
 
         if layer.model.config.is_resource_strategy(layer):
@@ -197,3 +173,37 @@ class QuartusBackend(FPGABackend):
     def init_embed(self, layer):
         if layer.attributes['n_in'] is None:
            raise Exception('Input length of Embedding layer must be specified.')
+
+    @layer_optimizer(Conv1D)
+    def init_conv1d(self, layer):
+        # This can happen if we assign weights of Dense layer to 1x1 Conv1D
+        if len(layer.weights['weight'].data.shape) == 2:
+            layer.weights['weight'].data = np.expand_dims(layer.weights['weight'].data, axis=(0,1))
+        
+        # Dense matrix multiply properties
+        layer.set_attr('rfpad', 0)
+        layer.set_attr('bfpad', 0)
+
+        # Reuse and parallelization factors
+        layer.set_attr('strategy', 'resource')
+        n_in, n_out = self.get_layer_mult_size(layer)
+        self.set_target_reuse_factor(layer)
+        self.set_closest_reuse_factor(layer, n_in, n_out)
+        layer.set_attr('parallelisation', layer.model.config.get_layer_config_value(layer, 'ParallelisationFactor', 1))
+
+    @layer_optimizer(Conv2D)
+    def init_conv2d(self, layer):
+        # This can happen if we assign weights of Dense layer to 1x1 Conv2D
+        if len(layer.weights['weight'].data.shape) == 2: 
+            layer.weights['weight'].data = np.expand_dims(layer.weights['weight'].data, axis=(0,1))
+
+        # Dense matrix multiply properties
+        layer.set_attr('rfpad', 0)
+        layer.set_attr('bfpad', 0)
+        
+        # Reuse and parallelization factors
+        layer.set_attr('strategy', 'resource')
+        n_in, n_out = self.get_layer_mult_size(layer)
+        self.set_target_reuse_factor(layer)
+        self.set_closest_reuse_factor(layer, n_in, n_out)
+        layer.set_attr('parallelisation', layer.model.config.get_layer_config_value(layer, 'ParallelisationFactor', 1))
