@@ -94,35 +94,40 @@ class QuartusBackend(FPGABackend):
 
         return config
 
-    def build(self, model, synth=True, fpgasynth=False):
+    def build(self, model, synth=True, fpgasynth=False, logging=1, cont_if_large_area=False):
         """
         Builds the project using Intel HLS compiler.
 
-        Users should generally not call this function directly but instead use `ModelGraph.build()`.
-        This function assumes the model was written with a call to `ModelGraph.write()`
-
         Args:
             model (ModelGraph): The model to build
-            synth, optional: Whether to run synthesis
-            fpgasynth, optional:  Whether to run fpga synthesis
-
+            synth, optional: Whether to run HLS synthesis
+            fpgasynth, optional:  Whether to run FPGA synthesis (Quartus Compile)
+            logging, optional: Logging level to be displayed during HLS synthesis (0, 1, 2)
+            cont_if_large_area: Instruct the HLS compiler to continue synthesis if the estimated resource usaga exceeds device resources
         Errors raise exceptions
         """
+
+        # Check software needed is present
         found = os.system('command -v i++ > /dev/null')
         if found != 0:
             raise Exception('Intel HLS installation not found. Make sure "i++" is on PATH.')
 
-        with chdir(model.config.get_output_dir()):
-            if synth:
-                os.system('make {}-fpga'.format(model.config.get_project_name()))
-                os.system('./{}-fpga'.format(model.config.get_project_name()))
-
-            if fpgasynth:
+        if fpgasynth:
+                if fpgasynth and not synth:
+                    raise Exception('HLS Synthesis needs to be run before FPGA synthesis')
                 found = os.system('command -v quartus_sh > /dev/null')
                 if found != 0:
                     raise Exception('Quartus installation not found. Make sure "quartus_sh" is on PATH.')
-                os.chdir(model.config.get_project_name() + '-fpga.prj/quartus')
-                os.system('quartus_sh --flow compile quartus_compile')
+
+        with chdir(model.config.get_output_dir()):
+            if synth:
+                quartus_compile = 'QUARTUS_COMPILE=--quartus-compile' if fpgasynth else ''
+                cont_synth = 'CONT_IF_LARGE_AREA=--dont-error-if-large-area-est' if cont_if_large_area else ''
+                log_1 = 'LOGGING_1=-v ' if logging >= 1 else ''
+                log_2 = 'LOGGING_2=-v ' if logging >= 2 else ''
+                os.system(f'make {model.config.get_project_name()}-fpga {log_1} {log_2} {cont_synth} {quartus_compile}')
+
+                os.system('singularity exec /home/boz/Desktop/hls4ml/software/quartus.sif ./{}-fpga'.format(model.config.get_project_name()))
 
         return parse_quartus_report(model.config.get_output_dir())
 
@@ -209,7 +214,7 @@ class QuartusBackend(FPGABackend):
         # Dense matrix multiply properties
         layer.set_attr('rfpad', 0)
         layer.set_attr('bfpad', 0)
-        
+
         # Reuse and parallelization factors
         layer.set_attr('strategy', 'resource')
         n_in, n_out = self.get_layer_mult_size(layer)
